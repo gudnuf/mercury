@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/gudnuf/mercury/internal/db"
@@ -38,6 +39,15 @@ func newReadCmd() *cobra.Command {
 					return err
 				}
 				if !follow {
+					if len(msgs) == 0 && channel == "" {
+						subs, err := d.Subscriptions(as)
+						if err != nil {
+							return err
+						}
+						if len(subs) == 0 {
+							fmt.Fprintln(os.Stderr, "No subscriptions. Use: mercury subscribe --as "+as+" --channel CHANNEL")
+						}
+					}
 					return nil
 				}
 				time.Sleep(500 * time.Millisecond)
