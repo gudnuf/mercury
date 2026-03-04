@@ -25,7 +25,7 @@
           pname = "mercury";
           version = "0.1.0";
           src = ./.;
-          vendorHash = null; # will need updating after go mod tidy
+          vendorHash = "sha256-qOWInVJQ9t9rODdzpKeVeFhJhuR3gEa76TV1g9OD/lg=";
         };
       });
     };
