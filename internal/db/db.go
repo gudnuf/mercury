@@ -66,9 +66,17 @@ func Open() (*DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("db path: %w", err)
 	}
-	conn, err := sql.Open("sqlite", path+"?_journal_mode=WAL")
+	return OpenPath(path)
+}
+
+func OpenPath(path string) (*DB, error) {
+	conn, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
+	}
+	if _, err := conn.Exec("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;"); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("set pragmas: %w", err)
 	}
 	if _, err := conn.Exec(schema); err != nil {
 		conn.Close()
