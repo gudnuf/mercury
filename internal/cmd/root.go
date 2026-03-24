@@ -27,6 +27,7 @@ func NewRootCmd() *cobra.Command {
 		newUnsubscribeCmd(),
 		newChannelsCmd(),
 		newLogCmd(),
+		newRouteCmd(),
 	)
 
 	return root

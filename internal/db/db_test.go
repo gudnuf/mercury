@@ -254,3 +254,190 @@ func TestChannelsList(t *testing.T) {
 		}
 	}
 }
+
+func TestAddAndListRoutes(t *testing.T) {
+	d := openTestDB(t)
+
+	if err := d.AddRoute("status", "discord:123456", "{}"); err != nil {
+		t.Fatalf("add route: %v", err)
+	}
+	if err := d.AddRoute("*", "discord:789012", `{"format":"compact"}`); err != nil {
+		t.Fatalf("add wildcard route: %v", err)
+	}
+
+	routes, err := d.ListRoutes()
+	if err != nil {
+		t.Fatalf("list routes: %v", err)
+	}
+	if len(routes) != 2 {
+		t.Fatalf("expected 2 routes, got %d", len(routes))
+	}
+
+	// Ordered by channel, destination — "*" sorts before "status"
+	if routes[0].Channel != "*" {
+		t.Fatalf("routes[0].Channel: got %q, want %q", routes[0].Channel, "*")
+	}
+	if routes[0].Destination != "discord:789012" {
+		t.Fatalf("routes[0].Destination: got %q, want %q", routes[0].Destination, "discord:789012")
+	}
+	if routes[0].Config != `{"format":"compact"}` {
+		t.Fatalf("routes[0].Config: got %q, want %q", routes[0].Config, `{"format":"compact"}`)
+	}
+	if !routes[0].Active {
+		t.Fatal("routes[0] should be active")
+	}
+
+	if routes[1].Channel != "status" {
+		t.Fatalf("routes[1].Channel: got %q, want %q", routes[1].Channel, "status")
+	}
+	if routes[1].Destination != "discord:123456" {
+		t.Fatalf("routes[1].Destination: got %q, want %q", routes[1].Destination, "discord:123456")
+	}
+}
+
+func TestAddRouteDuplicate(t *testing.T) {
+	d := openTestDB(t)
+
+	if err := d.AddRoute("status", "discord:123", "{}"); err != nil {
+		t.Fatalf("add route: %v", err)
+	}
+	// Adding the same channel+destination again should not error (INSERT OR IGNORE)
+	if err := d.AddRoute("status", "discord:123", `{"updated":true}`); err != nil {
+		t.Fatalf("add duplicate route: %v", err)
+	}
+
+	routes, err := d.ListRoutes()
+	if err != nil {
+		t.Fatalf("list routes: %v", err)
+	}
+	if len(routes) != 1 {
+		t.Fatalf("expected 1 route after duplicate add, got %d", len(routes))
+	}
+	// Config should remain the original since INSERT OR IGNORE keeps existing row
+	if routes[0].Config != "{}" {
+		t.Fatalf("config: got %q, want %q", routes[0].Config, "{}")
+	}
+}
+
+func TestAddRouteDefaultConfig(t *testing.T) {
+	d := openTestDB(t)
+
+	// Empty config should default to "{}"
+	if err := d.AddRoute("status", "discord:123", ""); err != nil {
+		t.Fatalf("add route: %v", err)
+	}
+
+	routes, err := d.ListRoutes()
+	if err != nil {
+		t.Fatalf("list routes: %v", err)
+	}
+	if len(routes) != 1 {
+		t.Fatalf("expected 1 route, got %d", len(routes))
+	}
+	if routes[0].Config != "{}" {
+		t.Fatalf("config: got %q, want %q", routes[0].Config, "{}")
+	}
+}
+
+func TestRemoveRoute(t *testing.T) {
+	d := openTestDB(t)
+
+	if err := d.AddRoute("status", "discord:123", "{}"); err != nil {
+		t.Fatalf("add route: %v", err)
+	}
+
+	removed, err := d.RemoveRoute("status", "discord:123")
+	if err != nil {
+		t.Fatalf("remove route: %v", err)
+	}
+	if !removed {
+		t.Fatal("expected route to be removed")
+	}
+
+	routes, err := d.ListRoutes()
+	if err != nil {
+		t.Fatalf("list routes: %v", err)
+	}
+	if len(routes) != 0 {
+		t.Fatalf("expected 0 routes after removal, got %d", len(routes))
+	}
+}
+
+func TestRemoveRouteNotFound(t *testing.T) {
+	d := openTestDB(t)
+
+	removed, err := d.RemoveRoute("nonexistent", "discord:123")
+	if err != nil {
+		t.Fatalf("remove route: %v", err)
+	}
+	if removed {
+		t.Fatal("expected no route to be removed")
+	}
+}
+
+func TestRoutesByChannel(t *testing.T) {
+	d := openTestDB(t)
+
+	if err := d.AddRoute("status", "discord:111", "{}"); err != nil {
+		t.Fatalf("add route: %v", err)
+	}
+	if err := d.AddRoute("alerts", "discord:222", "{}"); err != nil {
+		t.Fatalf("add route: %v", err)
+	}
+	if err := d.AddRoute("*", "discord:333", "{}"); err != nil {
+		t.Fatalf("add wildcard route: %v", err)
+	}
+
+	// Query for "status" should return the specific route + wildcard
+	routes, err := d.RoutesByChannel("status")
+	if err != nil {
+		t.Fatalf("routes by channel: %v", err)
+	}
+	if len(routes) != 2 {
+		t.Fatalf("expected 2 routes for 'status', got %d", len(routes))
+	}
+
+	dests := map[string]bool{}
+	for _, r := range routes {
+		dests[r.Destination] = true
+	}
+	if !dests["discord:111"] {
+		t.Fatal("missing discord:111 route")
+	}
+	if !dests["discord:333"] {
+		t.Fatal("missing discord:333 wildcard route")
+	}
+
+	// Query for "alerts" should return the specific route + wildcard
+	routes, err = d.RoutesByChannel("alerts")
+	if err != nil {
+		t.Fatalf("routes by channel: %v", err)
+	}
+	if len(routes) != 2 {
+		t.Fatalf("expected 2 routes for 'alerts', got %d", len(routes))
+	}
+
+	// Query for "other" should return only wildcard
+	routes, err = d.RoutesByChannel("other")
+	if err != nil {
+		t.Fatalf("routes by channel: %v", err)
+	}
+	if len(routes) != 1 {
+		t.Fatalf("expected 1 route for 'other', got %d", len(routes))
+	}
+	if routes[0].Destination != "discord:333" {
+		t.Fatalf("expected wildcard route, got %q", routes[0].Destination)
+	}
+}
+
+func TestListRoutesEmpty(t *testing.T) {
+	d := openTestDB(t)
+
+	routes, err := d.ListRoutes()
+	if err != nil {
+		t.Fatalf("list routes: %v", err)
+	}
+	if routes != nil {
+		t.Fatalf("expected nil routes, got %d", len(routes))
+	}
+}

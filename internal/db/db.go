@@ -33,8 +33,19 @@ CREATE TABLE IF NOT EXISTS cursors (
   PRIMARY KEY (agent, channel)
 );
 
+CREATE TABLE IF NOT EXISTS routes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  channel TEXT NOT NULL,
+  destination TEXT NOT NULL,
+  config TEXT NOT NULL DEFAULT '{}',
+  active BOOLEAN NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  UNIQUE(channel, destination)
+);
+
 CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel);
 CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at);
+CREATE INDEX IF NOT EXISTS idx_routes_channel ON routes(channel);
 `
 
 type DB struct {
@@ -47,6 +58,15 @@ type Message struct {
 	Sender    string
 	Body      string
 	CreatedAt string
+}
+
+type Route struct {
+	ID          int64
+	Channel     string
+	Destination string
+	Config      string
+	Active      bool
+	CreatedAt   string
 }
 
 func dbPath() (string, error) {
@@ -246,4 +266,67 @@ func scanMessages(rows *sql.Rows) ([]Message, error) {
 		msgs = append(msgs, m)
 	}
 	return msgs, rows.Err()
+}
+
+func (d *DB) AddRoute(channel, destination, config string) error {
+	if config == "" {
+		config = "{}"
+	}
+	_, err := d.conn.Exec(
+		"INSERT OR IGNORE INTO routes (channel, destination, config) VALUES (?, ?, ?)",
+		channel, destination, config,
+	)
+	return err
+}
+
+func (d *DB) RemoveRoute(channel, destination string) (bool, error) {
+	res, err := d.conn.Exec(
+		"DELETE FROM routes WHERE channel = ? AND destination = ?",
+		channel, destination,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+func (d *DB) ListRoutes() ([]Route, error) {
+	rows, err := d.conn.Query(
+		"SELECT id, channel, destination, config, active, created_at FROM routes ORDER BY channel, destination",
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanRoutes(rows)
+}
+
+func (d *DB) RoutesByChannel(channel string) ([]Route, error) {
+	rows, err := d.conn.Query(
+		`SELECT id, channel, destination, config, active, created_at FROM routes
+		 WHERE active = 1 AND (channel = ? OR channel = '*')
+		 ORDER BY channel, destination`,
+		channel,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanRoutes(rows)
+}
+
+func scanRoutes(rows *sql.Rows) ([]Route, error) {
+	var routes []Route
+	for rows.Next() {
+		var r Route
+		if err := rows.Scan(&r.ID, &r.Channel, &r.Destination, &r.Config, &r.Active, &r.CreatedAt); err != nil {
+			return nil, err
+		}
+		routes = append(routes, r)
+	}
+	return routes, rows.Err()
 }
