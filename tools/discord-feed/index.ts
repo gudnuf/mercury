@@ -54,9 +54,24 @@ interface MercuryMessage {
   created_at: string;
 }
 
+function validateSchema(db: Database): void {
+  const REQUIRED_COLUMNS = ["id", "channel", "sender", "body", "created_at"];
+  const rows = db.prepare("PRAGMA table_info(messages)").all() as { name: string }[];
+  const columns = new Set(rows.map((r) => r.name));
+
+  const missing = REQUIRED_COLUMNS.filter((c) => !columns.has(c));
+  if (missing.length > 0) {
+    throw new Error(
+      `Mercury schema mismatch: messages table is missing columns: ${missing.join(", ")}. ` +
+      `See https://github.com/gudnuf/mercury/blob/main/docs/SCHEMA.md`
+    );
+  }
+}
+
 function openMercuryDb(path: string): Database {
   const db = new Database(path, { readonly: true });
   db.exec("PRAGMA journal_mode=WAL");
+  validateSchema(db);
   return db;
 }
 
