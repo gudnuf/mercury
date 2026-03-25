@@ -1,6 +1,6 @@
 # Mercury Discord Feed
 
-A lightweight service that mirrors Mercury messages into a Discord channel in real-time. Watch agent coordination from Discord without SSH.
+A lightweight service that mirrors Mercury messages into Discord channels via the routes table. Supports routing different Mercury channels to different Discord channels.
 
 ## How it works
 
@@ -11,22 +11,22 @@ Mercury SQLite DB (read-only)
         v
 +---------------------+
 |  mercury-discord-feed|       discord.js
-|  (bun/TypeScript)   |--------------------->  Discord Channel
-|                     |    POST embeds
+|  (bun/TypeScript)   |----->  Discord Channel A  (route: status -> discord:123)
+|                     |----->  Discord Channel B  (route: * -> discord:456)
 +---------------------+
         |
-        |  persist cursor
+        |  per-route cursors
         v
-   cursor file (~/.local/share/mercury/discord-feed-cursor)
+   cursor dir (~/.local/share/mercury/feed-cursors/)
 ```
 
-The service polls Mercury's SQLite database for new messages and posts them as formatted Discord embeds. A cursor file tracks the last-posted message ID so no messages are lost across restarts.
+The service reads the `routes` table from Mercury's DB to determine which Mercury channels map to which Discord channels. Each route has its own cursor, so routes can be added without replaying history.
 
 ## Requirements
 
 - [Bun](https://bun.sh) runtime
 - A Discord bot token with "Send Messages" and "Embed Links" permissions
-- Access to Mercury's SQLite database
+- Access to Mercury's SQLite database (with `routes` table)
 
 ## Setup
 
@@ -35,16 +35,54 @@ cd tools/discord-feed
 bun install
 ```
 
+## Routes
+
+Routes are managed via the Mercury CLI:
+
+```bash
+# Route all messages to a Discord channel (wildcard)
+mercury route add --channel '*' --to 'discord:123456789012345678'
+
+# Route a specific Mercury channel to a specific Discord channel
+mercury route add --channel 'status' --to 'discord:987654321098765432'
+
+# Set format per route (embed, compact, or plain)
+mercury route add --channel 'workers' --to 'discord:111222333444555666' --config '{"format":"compact"}'
+
+# List routes
+mercury route list
+
+# Remove a route
+mercury route remove --channel 'status' --to 'discord:987654321098765432'
+```
+
+### Route matching
+
+- Exact match: `channel = "status"` matches only messages on the `status` channel
+- Wildcard: `channel = "*"` matches ALL messages
+- A message can match multiple routes and be posted to multiple Discord channels
+
+### Format options
+
+Set via the `config` JSON on each route:
+
+| Format | Description |
+|--------|-------------|
+| `embed` (default) | Rich embed with color, title, author, body, timestamp |
+| `compact` | Single line: `#channel \| sender: body` |
+| `plain` | Plain text: `[channel] sender: body` |
+
 ## Configuration
 
-All configuration via environment variables:
+Environment variables:
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `DISCORD_BOT_TOKEN` | yes | -- | Discord bot token |
-| `DISCORD_FEED_CHANNEL_ID` | yes | -- | Discord channel ID to post messages to |
+| `DISCORD_FEED_CHANNEL_ID` | no | -- | Fallback channel ID if no routes exist |
 | `MERCURY_DB_PATH` | no | `~/.local/share/mercury/mercury.db` | Path to Mercury SQLite database |
-| `CURSOR_FILE_PATH` | no | `~/.local/share/mercury/discord-feed-cursor` | Path to cursor persistence file |
+| `CURSOR_DIR` | no | `~/.local/share/mercury/feed-cursors/` | Directory for per-route cursor files |
+| `CURSOR_FILE_PATH` | no | `~/.local/share/mercury/discord-feed-cursor` | Old cursor file (migrated on first run) |
 | `POLL_INTERVAL_MS` | no | `2000` | Poll interval in milliseconds |
 | `BATCH_LIMIT` | no | `50` | Max messages per poll cycle |
 
@@ -52,53 +90,17 @@ All configuration via environment variables:
 
 ```bash
 export DISCORD_BOT_TOKEN="your-bot-token"
-export DISCORD_FEED_CHANNEL_ID="123456789012345678"
 bun run start
 ```
 
-## Message format
+## Backward compatibility
 
-Each Mercury message becomes a Discord embed:
-
-```
-+------------------------------------------+
-|  <emoji> #channel-name                   |  <- title with channel-specific color
-|                                          |
-|  sender-name                             |  <- author
-|  Message body text here                  |  <- description
-|                                          |
-|  2026-03-22 10:27:49 UTC                 |  <- footer timestamp
-+------------------------------------------+
-```
-
-- Short status messages (e.g. "online, starting work") are posted as compact plain text instead of embeds
-- Messages over 4000 characters are truncated with a note
-- Consecutive duplicate messages from the same sender are skipped
-
-## Systemd service example
-
-```ini
-[Unit]
-Description=Mercury to Discord live feed
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=/path/to/bun run /path/to/tools/discord-feed/index.ts
-Restart=always
-RestartSec=5
-Environment=DISCORD_BOT_TOKEN=your-token
-Environment=DISCORD_FEED_CHANNEL_ID=your-channel-id
-Environment=MERCURY_DB_PATH=/path/to/mercury.db
-
-[Install]
-WantedBy=multi-user.target
-```
+If no routes are found in the DB, the service falls back to `DISCORD_FEED_CHANNEL_ID` (posting all messages to one channel, the pre-routes behavior). On first startup with routes, the old single cursor file is migrated to per-route cursors.
 
 ## Behavior notes
 
-- On startup, if there are more than 100 unprocessed messages, the service skips the backlog and posts a summary instead of flooding the channel
-- The service waits and retries if the Mercury DB doesn't exist yet (useful when starting before Mercury has been used)
-- Cursor writes are atomic (write-to-temp then rename) to prevent corruption on crash
+- Routes are refreshed from DB every ~60 seconds (new routes are picked up automatically)
+- On startup, if a route has >100 unprocessed messages, the backlog is skipped
+- Consecutive duplicate messages from the same sender are skipped
+- Cursor writes are atomic (write-to-temp then rename)
 - `discord.js` handles Discord rate limits and reconnection automatically
