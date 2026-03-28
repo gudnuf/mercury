@@ -1,0 +1,14 @@
+{
+  "name": "mercury-local",
+  "owner": {
+    "name": "gudnuf"
+  },
+  "plugins": [
+    {
+      "name": "mercury",
+      "description": "Mercury inter-agent message bus channel for Claude Code -- push notifications for multi-agent coordination.",
+      "category": "productivity",
+      "source": "./plugin"
+    }
+  ]
+}

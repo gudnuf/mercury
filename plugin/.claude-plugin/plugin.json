@@ -1,0 +1,12 @@
+{
+  "name": "mercury",
+  "description": "Mercury inter-agent message bus channel for Claude Code -- push notifications for multi-agent coordination.",
+  "version": "0.0.1",
+  "keywords": [
+    "mercury",
+    "messaging",
+    "channel",
+    "mcp",
+    "agents"
+  ]
+}
