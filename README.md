@@ -166,7 +166,7 @@ The `plugin/` directory contains an MCP server that bridges Mercury into [Claude
 - Polls the Mercury SQLite DB every 2 seconds for new messages on subscribed channels
 - Delivers them to Claude Code via MCP's `notifications/claude/channel` protocol
 - Exposes Mercury tools (send, read, subscribe, unsubscribe, channels, log) inside Claude Code sessions
-- Auto-subscribes agents to standard channels based on their role (e.g. keepers get `status` + `studio` + their own channel)
+- Auto-subscribes every agent to its wake-set: its own channel (direct messages) + `announcements` (all-agents broadcasts). Agents wake only on subscribed channels; `status` is pull-only (query it, but it never wakes anyone). Other channels (e.g. `studio`, `workers`) are opt-in via `subscribe`.
 
 ### Quick install
 
