@@ -34,6 +34,11 @@ const DB_PATH = join(homedir(), '.local', 'share', 'mercury', 'mercury.db')
 // --- Database ---
 
 function validateSchema(database: Database): void {
+  // Only REQUIRED columns are listed. `messages.meta` is intentionally absent:
+  // it is an optional, additive column. The plugin tolerates a DB with or
+  // without it — present means meta is forwarded in push notifications, absent
+  // (old DB) means it is skipped. Do NOT add `meta` here, or the plugin would
+  // refuse to start on older DBs.
   const EXPECTED: Record<string, string[]> = {
     messages: ['id', 'channel', 'sender', 'body', 'created_at'],
     subscriptions: ['agent', 'channel', 'created_at'],
@@ -64,6 +69,16 @@ try {
   process.exit(1)
 }
 
+// Detect the optional `messages.meta` column. Present on Mercury builds that
+// carry it; absent on older DBs. Drives whether the message SELECTs include
+// `meta` (selecting a non-existent column would throw), so the plugin runs
+// unchanged against either schema.
+const HAS_META: boolean = (
+  db.prepare(`PRAGMA table_info(messages)`).all() as { name: string }[]
+).some(r => r.name === 'meta')
+
+const metaCol = HAS_META ? ', meta' : ''
+
 // --- Prepared Statements ---
 
 const stmtInsertMessage = db.prepare(
@@ -92,7 +107,7 @@ const stmtUpsertCursor = db.prepare(
 )
 
 const stmtGetNewMessages = db.prepare(
-  `SELECT id, channel, sender, body, created_at FROM messages
+  `SELECT id, channel, sender, body, created_at${metaCol} FROM messages
    WHERE channel = $channel AND id > $last_read_id
    ORDER BY id ASC`
 )
@@ -106,13 +121,13 @@ const stmtChannelStats = db.prepare(
 )
 
 const stmtGetHistory = db.prepare(
-  `SELECT id, channel, sender, body, created_at FROM messages
+  `SELECT id, channel, sender, body, created_at${metaCol} FROM messages
    WHERE channel = $channel
    ORDER BY id DESC LIMIT $limit`
 )
 
 const stmtGetAllHistory = db.prepare(
-  `SELECT id, channel, sender, body, created_at FROM messages
+  `SELECT id, channel, sender, body, created_at${metaCol} FROM messages
    ORDER BY id DESC LIMIT $limit`
 )
 
@@ -124,6 +139,7 @@ type MessageRow = {
   sender: string
   body: string
   created_at: string
+  meta?: string
 }
 
 type ChannelRow = { channel: string }
@@ -401,6 +417,18 @@ function pollForMessages(): void {
           continue
         }
 
+        // Merge the row's opaque sidecar meta into the notification. A row with
+        // no meta pushes unchanged (back-compat). Mercury attaches no meaning;
+        // the value is whatever the message's producer set.
+        let extra: Record<string, unknown> = {}
+        if (m.meta) {
+          try {
+            extra = JSON.parse(m.meta) as Record<string, unknown>
+          } catch (err) {
+            process.stderr.write(`mercury channel: bad meta JSON on message ${m.id}: ${err}\n`)
+          }
+        }
+
         // Push notification to Claude
         mcp.notification({
           method: 'notifications/claude/channel',
@@ -412,6 +440,7 @@ function pollForMessages(): void {
               user: m.sender,
               ts: m.created_at,
               source: 'mercury',
+              ...extra,
             },
           },
         }).catch(err => {

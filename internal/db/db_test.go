@@ -441,3 +441,184 @@ func TestListRoutesEmpty(t *testing.T) {
 		t.Fatalf("expected nil routes, got %d", len(routes))
 	}
 }
+
+func TestSchemaHasSurfacesTable(t *testing.T) {
+	d := openTestDB(t)
+
+	var name string
+	err := d.conn.QueryRow(
+		"SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'surfaces'",
+	).Scan(&name)
+	if err != nil {
+		t.Fatalf("surfaces table not found: %v", err)
+	}
+	if name != "surfaces" {
+		t.Fatalf("expected surfaces table, got %q", name)
+	}
+
+	// Confirm the declared general columns are present (kind/address are
+	// opaque to Mercury and consumer-defined).
+	want := []string{"mercury_channel", "kind", "address", "parent_channel", "name", "created_at"}
+	for _, col := range want {
+		has, err := hasColumn(d.conn, "surfaces", col)
+		if err != nil {
+			t.Fatalf("hasColumn(surfaces, %s): %v", col, err)
+		}
+		if !has {
+			t.Fatalf("surfaces missing column %q", col)
+		}
+	}
+}
+
+func TestAddAndListSurfaces(t *testing.T) {
+	d := openTestDB(t)
+
+	if err := d.AddSurface("room:1", "example", "addr-1", "", "General"); err != nil {
+		t.Fatalf("add surface: %v", err)
+	}
+	if err := d.AddSurface("room:2", "example", "addr-2", "room:1", ""); err != nil {
+		t.Fatalf("add child surface: %v", err)
+	}
+
+	surfaces, err := d.ListSurfaces()
+	if err != nil {
+		t.Fatalf("list surfaces: %v", err)
+	}
+	if len(surfaces) != 2 {
+		t.Fatalf("expected 2 surfaces, got %d", len(surfaces))
+	}
+
+	// Ordered by mercury_channel.
+	if surfaces[0].MercuryChannel != "room:1" {
+		t.Fatalf("surfaces[0].MercuryChannel: got %q, want %q", surfaces[0].MercuryChannel, "room:1")
+	}
+	if surfaces[0].Kind != "example" {
+		t.Fatalf("surfaces[0].Kind: got %q, want %q", surfaces[0].Kind, "example")
+	}
+	if surfaces[0].Address != "addr-1" {
+		t.Fatalf("surfaces[0].Address: got %q, want %q", surfaces[0].Address, "addr-1")
+	}
+	if surfaces[0].ParentChannel != "" {
+		t.Fatalf("surfaces[0].ParentChannel: got %q, want empty", surfaces[0].ParentChannel)
+	}
+	if surfaces[0].Name != "General" {
+		t.Fatalf("surfaces[0].Name: got %q, want %q", surfaces[0].Name, "General")
+	}
+
+	if surfaces[1].ParentChannel != "room:1" {
+		t.Fatalf("surfaces[1].ParentChannel: got %q, want %q", surfaces[1].ParentChannel, "room:1")
+	}
+	if surfaces[1].Name != "" {
+		t.Fatalf("surfaces[1].Name: got %q, want empty", surfaces[1].Name)
+	}
+}
+
+func TestAddSurfaceUpsert(t *testing.T) {
+	d := openTestDB(t)
+
+	if err := d.AddSurface("room:1", "example", "addr-1", "", "Old"); err != nil {
+		t.Fatalf("add surface: %v", err)
+	}
+	// Re-adding the same mercury_channel updates the row (PRIMARY KEY upsert).
+	if err := d.AddSurface("room:1", "example", "addr-2", "", "New"); err != nil {
+		t.Fatalf("re-add surface: %v", err)
+	}
+
+	surfaces, err := d.ListSurfaces()
+	if err != nil {
+		t.Fatalf("list surfaces: %v", err)
+	}
+	if len(surfaces) != 1 {
+		t.Fatalf("expected 1 surface after upsert, got %d", len(surfaces))
+	}
+	if surfaces[0].Address != "addr-2" {
+		t.Fatalf("address: got %q, want %q", surfaces[0].Address, "addr-2")
+	}
+	if surfaces[0].Name != "New" {
+		t.Fatalf("name: got %q, want %q", surfaces[0].Name, "New")
+	}
+}
+
+func TestRemoveSurface(t *testing.T) {
+	d := openTestDB(t)
+
+	if err := d.AddSurface("room:1", "example", "addr-1", "", ""); err != nil {
+		t.Fatalf("add surface: %v", err)
+	}
+
+	removed, err := d.RemoveSurface("room:1")
+	if err != nil {
+		t.Fatalf("remove surface: %v", err)
+	}
+	if !removed {
+		t.Fatal("expected surface to be removed")
+	}
+
+	surfaces, err := d.ListSurfaces()
+	if err != nil {
+		t.Fatalf("list surfaces: %v", err)
+	}
+	if len(surfaces) != 0 {
+		t.Fatalf("expected 0 surfaces after removal, got %d", len(surfaces))
+	}
+}
+
+func TestRemoveSurfaceNotFound(t *testing.T) {
+	d := openTestDB(t)
+
+	removed, err := d.RemoveSurface("nonexistent")
+	if err != nil {
+		t.Fatalf("remove surface: %v", err)
+	}
+	if removed {
+		t.Fatal("expected no surface to be removed")
+	}
+}
+
+func TestSchemaHasMessagesMeta(t *testing.T) {
+	d := openTestDB(t)
+
+	has, err := hasColumn(d.conn, "messages", "meta")
+	if err != nil {
+		t.Fatalf("hasColumn(messages, meta): %v", err)
+	}
+	if !has {
+		t.Fatal("messages.meta column not found")
+	}
+}
+
+func TestMigrateMetaIsIdempotent(t *testing.T) {
+	d := openTestDB(t)
+
+	// migrate already ran during OpenPath; running it again must not error
+	// (the column already exists) and must not duplicate the column.
+	if err := migrate(d.conn); err != nil {
+		t.Fatalf("second migrate: %v", err)
+	}
+
+	rows, err := d.conn.Query("PRAGMA table_info(messages)")
+	if err != nil {
+		t.Fatalf("table_info: %v", err)
+	}
+	defer rows.Close()
+	metaCount := 0
+	for rows.Next() {
+		var (
+			cid        int
+			name       string
+			ctype      string
+			notNull    int
+			dflt       interface{}
+			primaryKey int
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dflt, &primaryKey); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if name == "meta" {
+			metaCount++
+		}
+	}
+	if metaCount != 1 {
+		t.Fatalf("expected exactly 1 meta column, got %d", metaCount)
+	}
+}
