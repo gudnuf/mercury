@@ -389,38 +389,18 @@ type CursorRow = { last_read_id: number }
 type LatestRow = { max_id: number }
 type StatsRow = { channel: string; count: number; latest: string }
 
-// --- Auto-subscribe based on role ---
+// --- Auto-subscribe (wake-set) ---
 
+// An agent wakes only on channels it subscribes to. The minimum set that must
+// reach it: its own channel (direct messages) and `announcements` (deliberate
+// all-agents broadcasts). Channels are created on first subscribe.
 function autoSubscribe(): void {
   const now = new Date().toISOString()
-
-  // All roles subscribe to status
-  stmtInsertSubscription.run({ $agent: IDENTITY, $channel: 'status', $created_at: now })
-
-  const parts = IDENTITY!.split(':')
-  const role = parts[0]
-
-  if (role === 'oracle') {
-    stmtInsertSubscription.run({ $agent: IDENTITY, $channel: 'studio', $created_at: now })
-  } else if (role === 'keeper') {
-    stmtInsertSubscription.run({ $agent: IDENTITY, $channel: 'studio', $created_at: now })
-    // Subscribe to own channel (e.g. keeper:murmur -> channel "keeper:murmur")
-    stmtInsertSubscription.run({ $agent: IDENTITY, $channel: IDENTITY!, $created_at: now })
-  } else if (role === 'worker') {
-    stmtInsertSubscription.run({ $agent: IDENTITY, $channel: 'workers', $created_at: now })
-  }
+  stmtInsertSubscription.run({ $agent: IDENTITY, $channel: IDENTITY!, $created_at: now })
+  stmtInsertSubscription.run({ $agent: IDENTITY, $channel: 'announcements', $created_at: now })
 }
 
 autoSubscribe()
-
-// --- Send startup message ---
-
-function sendStartupMessage(): void {
-  const now = new Date().toISOString()
-  stmtInsertMessage.run({ $channel: 'status', $sender: IDENTITY, $body: `${IDENTITY} online`, $created_at: now })
-}
-
-sendStartupMessage()
 
 // --- MCP Server ---
 
@@ -432,7 +412,9 @@ const mcp = new Server(
       `Messages from Mercury arrive as <channel source="plugin:mercury:mercury" chat_id="CHANNEL" user="SENDER" ...>.`,
       `Use the send tool to reply. Pass chat_id as the channel name.`,
       `Mercury is the inter-agent message bus — other Claude sessions communicate through it.`,
-      `Your Mercury identity is ${IDENTITY}. Post status updates to the "status" channel.`,
+      `Your Mercury identity is ${IDENTITY}. You are subscribed to your own channel ("${IDENTITY}") and "announcements".`,
+      `Direct a message to one agent by sending to its channel. Broadcast something every agent must see to "announcements".`,
+      `Routine online/status churn goes to "status", which is pull-only — agents are not subscribed to it, so it never wakes anyone.`,
     ].join('\n'),
   },
 )
@@ -855,11 +837,12 @@ FORGE_BASE="${FORGE_BASE:-$HOME/forge}"
 
 export MERCURY_IDENTITY="$IDENTITY"
 
-# Subscribe to standard channels
-mercury subscribe --as "$IDENTITY" --channel status
+# Subscribe to the wake-set: own channel (direct) + announcements (all-agents broadcasts).
+# These are the only channels an agent wakes on; status is pull-only, not subscribed.
 mercury subscribe --as "$IDENTITY" --channel "$IDENTITY"
+mercury subscribe --as "$IDENTITY" --channel announcements
 
-# Announce
+# Announce (status is pull-only — a coordinator queries it; nobody wakes on it)
 mercury send --as "$IDENTITY" --to status "online"
 
 # Auto-confirm dev channels dialog in tmux
@@ -906,14 +889,14 @@ Accept the development channels prompt. Inside the session:
 2. Use the read tool: `mercury read` -- should show "(no unread messages)" or recent messages
 3. Use the send tool: send a message to the status channel
 4. From another terminal: `mercury log --channel status` -- your message should appear
-5. From another terminal: `mercury send --as "outside" --to status "ping"` -- you should receive a push notification inside the Claude Code session
+5. From another terminal: `mercury send --as "outside" --to "test-agent" "ping"` -- you should receive a push notification inside the Claude Code session (the agent wakes only on its own channel + `announcements`, so target one of those, not `status`)
 
 ### 7c: Confirm push notifications work
 
 The key indicator: when you receive a push notification, Claude Code shows it as:
 
 ```
-<channel source="plugin:mercury:mercury" chat_id="status" user="outside" ...>
+<channel source="plugin:mercury:mercury" chat_id="test-agent" user="outside" ...>
 ping
 </channel>
 ```

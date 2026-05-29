@@ -131,38 +131,18 @@ type CursorRow = { last_read_id: number }
 type LatestRow = { max_id: number }
 type StatsRow = { channel: string; count: number; latest: string }
 
-// --- Auto-subscribe based on role ---
+// --- Auto-subscribe (wake-set) ---
 
+// An agent wakes only on channels it subscribes to. The minimum set that must
+// reach it: its own channel (direct messages) and `announcements` (deliberate
+// all-agents broadcasts). Channels are created on first subscribe.
 function autoSubscribe(): void {
   const now = new Date().toISOString()
-
-  // All roles subscribe to status
-  stmtInsertSubscription.run({ $agent: IDENTITY, $channel: 'status', $created_at: now })
-
-  const parts = IDENTITY!.split(':')
-  const role = parts[0]
-
-  if (role === 'oracle') {
-    stmtInsertSubscription.run({ $agent: IDENTITY, $channel: 'studio', $created_at: now })
-  } else if (role === 'keeper') {
-    stmtInsertSubscription.run({ $agent: IDENTITY, $channel: 'studio', $created_at: now })
-    // Subscribe to own channel (e.g. keeper:murmur -> channel "keeper:murmur")
-    stmtInsertSubscription.run({ $agent: IDENTITY, $channel: IDENTITY!, $created_at: now })
-  } else if (role === 'worker') {
-    stmtInsertSubscription.run({ $agent: IDENTITY, $channel: 'workers', $created_at: now })
-  }
+  stmtInsertSubscription.run({ $agent: IDENTITY, $channel: IDENTITY!, $created_at: now })
+  stmtInsertSubscription.run({ $agent: IDENTITY, $channel: 'announcements', $created_at: now })
 }
 
 autoSubscribe()
-
-// --- Send startup message ---
-
-function sendStartupMessage(): void {
-  const now = new Date().toISOString()
-  stmtInsertMessage.run({ $channel: 'status', $sender: IDENTITY, $body: `${IDENTITY} online`, $created_at: now })
-}
-
-sendStartupMessage()
 
 // --- MCP Server ---
 
@@ -174,7 +154,9 @@ const mcp = new Server(
       `Messages from Mercury arrive as <channel source="plugin:mercury:mercury" chat_id="CHANNEL" user="SENDER" ...>.`,
       `Use the send tool to reply. Pass chat_id as the channel name.`,
       `Mercury is the inter-agent message bus — other Claude sessions communicate through it.`,
-      `Your Mercury identity is ${IDENTITY}. Post status updates to the "status" channel.`,
+      `Your Mercury identity is ${IDENTITY}. You are subscribed to your own channel ("${IDENTITY}") and "announcements".`,
+      `Direct a message to one agent by sending to its channel. Broadcast something every agent must see to "announcements".`,
+      `Routine online/status churn goes to "status", which is pull-only — agents are not subscribed to it, so it never wakes anyone.`,
     ].join('\n'),
   },
 )
