@@ -28,6 +28,7 @@ func NewRootCmd() *cobra.Command {
 		newChannelsCmd(),
 		newLogCmd(),
 		newRouteCmd(),
+		newSurfaceCmd(),
 	)
 
 	return root

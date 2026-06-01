@@ -19,10 +19,13 @@ The append-only message log. Messages are never deleted by Mercury.
 | `sender` | TEXT | NOT NULL | Self-chosen agent identity (e.g. `oracle`, `worker:auth`). |
 | `body` | TEXT | NOT NULL | Opaque message text. Mercury never interprets content. |
 | `created_at` | TEXT | NOT NULL, DEFAULT `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')` | RFC3339 timestamp with fractional seconds, always UTC. |
+| `meta` | TEXT | nullable | Optional opaque JSON metadata attached by the message's producer. Mercury never interprets it; the MCP plugin merges it verbatim into the push-notification `meta` object. NULL when a producer attaches none. |
 
 **Indexes:**
 - `idx_messages_channel` on `(channel)` -- speeds up channel-filtered queries
 - `idx_messages_created` on `(created_at)` -- speeds up time-range queries
+
+**Migration note:** `meta` is added by an idempotent `ALTER TABLE messages ADD COLUMN meta TEXT` (guarded by a `PRAGMA table_info(messages)` check in `internal/db/db.go`), because `CREATE TABLE IF NOT EXISTS` cannot add a column to a pre-existing database. Pre-existing rows get NULL. Every existing `INSERT` that omits `meta` is unaffected (gets NULL); every existing `SELECT` that names columns is unaffected.
 
 ### subscriptions
 
@@ -66,6 +69,23 @@ Configures transport routing -- how messages on a channel get forwarded to exter
 **Unique constraint:** `(channel, destination)`
 
 **Index:** `idx_routes_channel` on `(channel)`
+
+### surfaces
+
+A registry mapping a Mercury channel to an external surface it is bound to. `kind` and `address` are opaque to Mercury and defined by the consumer that owns the integration: Mercury stores and serves the rows without interpreting either field, the same way it treats `routes.destination`. (For example, a Discord bridge might set `kind = 'discord'` and pack its coordinates into `address`; Mercury never parses them.) Written and read via the `surface` CLI commands.
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `mercury_channel` | TEXT | PRIMARY KEY | The Mercury channel this surface is bound to. |
+| `kind` | TEXT | NOT NULL | Consumer-defined surface kind. Opaque to Mercury. |
+| `address` | TEXT | NOT NULL | Consumer-defined surface address. Opaque to Mercury. |
+| `parent_channel` | TEXT | nullable | `mercury_channel` of a parent surface, else NULL. |
+| `name` | TEXT | nullable | Optional human label, best-effort. |
+| `created_at` | TEXT | NOT NULL, DEFAULT `strftime('%Y-%m-%dT%H:%M:%fZ','now')` | When the surface was first recorded. |
+
+**Primary key:** `mercury_channel`
+
+**Index:** `idx_surfaces_kind` on `(kind)`
 
 ## Relationships
 
@@ -160,7 +180,8 @@ When modifying Mercury's schema:
 1. **Update the Go source** -- `internal/db/db.go` contains the `schema` constant with all `CREATE TABLE IF NOT EXISTS` statements. This is the source of truth for migration.
 2. **Update this document** -- keep `docs/SCHEMA.md` in sync with the actual schema.
 3. **Notify downstream consumers** -- the following consumers depend on the schema:
-   - **MCP server plugin** (`damsac-studio/plugins/mercury/server.ts`) -- uses prepared statements against `messages`, `subscriptions`, and `cursors`.
+   - **MCP server plugin** (`plugin/server.ts`) -- uses prepared statements against `messages` (including `meta`), `subscriptions`, and `cursors`. Forwards `messages.meta` into push notifications.
    - **Discord feed tool** (`tools/discord-feed/index.ts`) -- reads from `messages` only.
+   - Consumers MAY attach `messages.meta` and register `surfaces`; both are opaque to Mercury and interpreted only by the consumer that sets them.
    - Any future consumers should be listed here.
 4. **Consider backwards compatibility** -- all tables use `CREATE TABLE IF NOT EXISTS`, so adding new tables is safe. Adding columns to existing tables requires `ALTER TABLE` migration logic.

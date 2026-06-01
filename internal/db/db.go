@@ -43,6 +43,16 @@ CREATE TABLE IF NOT EXISTS routes (
   UNIQUE(channel, destination)
 );
 
+CREATE TABLE IF NOT EXISTS surfaces (
+  mercury_channel TEXT PRIMARY KEY,
+  kind            TEXT NOT NULL,
+  address         TEXT NOT NULL,
+  parent_channel  TEXT,
+  name            TEXT,
+  created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_surfaces_kind ON surfaces(kind);
+
 CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel);
 CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at);
 CREATE INDEX IF NOT EXISTS idx_routes_channel ON routes(channel);
@@ -67,6 +77,18 @@ type Route struct {
 	Config      string
 	Active      bool
 	CreatedAt   string
+}
+
+// Surface registers a Mercury channel against an external surface. kind and
+// address are opaque to Mercury and defined by the consumer that owns the
+// integration; Mercury stores and serves the rows without interpreting them.
+type Surface struct {
+	MercuryChannel string
+	Kind           string
+	Address        string
+	ParentChannel  string
+	Name           string
+	CreatedAt      string
 }
 
 func dbPath() (string, error) {
@@ -102,7 +124,53 @@ func OpenPath(path string) (*DB, error) {
 		conn.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
+	if err := migrate(conn); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("migrate: %w", err)
+	}
 	return &DB{conn: conn}, nil
+}
+
+// migrate applies idempotent column additions that CREATE TABLE IF NOT EXISTS
+// cannot perform on a pre-existing database. Each migration checks for the
+// column before adding it, so it is safe to run on every open.
+func migrate(conn *sql.DB) error {
+	has, err := hasColumn(conn, "messages", "meta")
+	if err != nil {
+		return err
+	}
+	if !has {
+		if _, err := conn.Exec("ALTER TABLE messages ADD COLUMN meta TEXT"); err != nil {
+			return fmt.Errorf("add messages.meta: %w", err)
+		}
+	}
+	return nil
+}
+
+// hasColumn reports whether the named table already has the named column.
+func hasColumn(conn *sql.DB, table, column string) (bool, error) {
+	rows, err := conn.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			cid        int
+			name       string
+			ctype      string
+			notNull    int
+			dfltValue  sql.NullString
+			primaryKey int
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dfltValue, &primaryKey); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 func (d *DB) Close() error {
@@ -329,4 +397,65 @@ func scanRoutes(rows *sql.Rows) ([]Route, error) {
 		routes = append(routes, r)
 	}
 	return routes, rows.Err()
+}
+
+func (d *DB) AddSurface(channel, kind, address, parent, name string) error {
+	_, err := d.conn.Exec(
+		`INSERT INTO surfaces (mercury_channel, kind, address, parent_channel, name)
+		 VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT(mercury_channel) DO UPDATE SET
+		   kind = excluded.kind,
+		   address = excluded.address,
+		   parent_channel = excluded.parent_channel,
+		   name = excluded.name`,
+		channel, kind, address, nullIfEmpty(parent), nullIfEmpty(name),
+	)
+	return err
+}
+
+func (d *DB) RemoveSurface(channel string) (bool, error) {
+	res, err := d.conn.Exec(
+		"DELETE FROM surfaces WHERE mercury_channel = ?",
+		channel,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+func (d *DB) ListSurfaces() ([]Surface, error) {
+	rows, err := d.conn.Query(
+		"SELECT mercury_channel, kind, address, COALESCE(parent_channel, ''), COALESCE(name, ''), created_at FROM surfaces ORDER BY mercury_channel",
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanSurfaces(rows)
+}
+
+func scanSurfaces(rows *sql.Rows) ([]Surface, error) {
+	var surfaces []Surface
+	for rows.Next() {
+		var s Surface
+		if err := rows.Scan(&s.MercuryChannel, &s.Kind, &s.Address, &s.ParentChannel, &s.Name, &s.CreatedAt); err != nil {
+			return nil, err
+		}
+		surfaces = append(surfaces, s)
+	}
+	return surfaces, rows.Err()
+}
+
+// nullIfEmpty returns a nil interface for an empty string so optional columns
+// store SQL NULL rather than "".
+func nullIfEmpty(s string) interface{} {
+	if s == "" {
+		return nil
+	}
+	return s
 }
