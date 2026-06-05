@@ -397,15 +397,31 @@ function pollForMessages(): void {
     const subs = stmtGetSubscriptions.all({ $agent: IDENTITY }) as ChannelRow[]
 
     for (const { channel } of subs) {
-      const lastId = pollCursors.get(channel) ?? 0
-
-      // If this is a new subscription we haven't seen, init from latest
+      // First time this poll loop sees the subscription, seed its in-memory
+      // cursor. We must NOT skip the messages that already exist on the channel:
+      //  - A persisted `cursors` row is the source of truth — resume from it so
+      //    messages that arrived while this agent was offline still deliver, and
+      //    so a WU-9 auto-subscribe (bridge writes the message, then subscribes,
+      //    without writing a cursor row) delivers its triggering message.
+      //  - With no persisted cursor, seed at max_id - 1 (not max_id) so the most
+      //    recent / triggering message delivers, while older history stays
+      //    unreplayed. Then fall through to the delivery pass below — do NOT
+      //    `continue`, or the triggering message would be marked read-without-
+      //    delivery (the "silent-drop on new subscription" bug).
       if (!pollCursors.has(channel)) {
-        const latest = stmtGetLatestId.get({ $channel: channel }) as LatestRow
-        pollCursors.set(channel, latest.max_id)
-        stmtUpsertCursor.run({ $agent: IDENTITY, $channel: channel, $last_read_id: latest.max_id })
-        continue
+        const persisted = stmtGetCursor.get({ $agent: IDENTITY, $channel: channel }) as CursorRow | undefined
+        let seed: number
+        if (persisted) {
+          seed = persisted.last_read_id
+        } else {
+          const latest = stmtGetLatestId.get({ $channel: channel }) as LatestRow
+          seed = Math.max(0, latest.max_id - 1)
+        }
+        pollCursors.set(channel, seed)
+        stmtUpsertCursor.run({ $agent: IDENTITY, $channel: channel, $last_read_id: seed })
       }
+
+      const lastId = pollCursors.get(channel) ?? 0
 
       const msgs = stmtGetNewMessages.all({ $channel: channel, $last_read_id: lastId }) as MessageRow[]
 
